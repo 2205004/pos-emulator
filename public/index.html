@@ -1,25 +1,62 @@
 <!DOCTYPE html>
-<html>
+<html lang="ua">
 <head>
     <meta charset="utf-8">
-    <title>POS Emulator Monitor</title>
+    <title>POS Emulator UI</title>
     <style>
-        body { font-family: Arial; margin: 20px; }
-        #log { border: 1px solid #ccc; padding: 10px; height: 500px; overflow-y: auto; white-space: pre-wrap; }
+        body {
+            margin: 20px;
+            background: #fafafa;
+        }
+        #log {
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 500px;
+            overflow-y: auto;
+            background: white;
+            border-radius: 5px;
+        }
+        .ipbox {
+            background: #e9e9e9;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
     </style>
 </head>
 <body>
 
-<h2>POS Emulator WebSocket Log</h2>
+<h2>POS Terminal Emulator (TCP)</h2>
 
+<div class="ipbox">
+    <h3>Підключення клієнта</h3>
+    <div id="ips">Завантаження...</div>
+</div>
+
+<h3>Лог:</h3>
 <div id="log">Очікування подій...</div>
 
 <script>
-    const ws = new WebSocket("ws://" + location.host);
-    const logDiv = document.getElementById("log");
+    // Load local IPs
+    fetch("/ips")
+        .then(res => res.json())
+        .then(data => {
+            let html = `<b>Порт:</b> ${data.port}<br><br>`;
+            html += "<b>Підключайтесь клієнтом за адресою:</b><br>";
 
-    ws.onmessage = (ev) => {
-        logDiv.textContent += "\n" + ev.data;
+            data.ips.forEach(ip => {
+                html += `ws://${ip}:${data.port}<br>`;
+            });
+
+            document.getElementById("ips").innerHTML = html;
+        });
+
+    // Log stream via SSE
+    const logDiv = document.getElementById("log");
+    const evtSource = new EventSource("/log-stream");
+
+    evtSource.onmessage = (e) => {
+        logDiv.innerHTML += "<div>" + e.data + "</div>";
         logDiv.scrollTop = logDiv.scrollHeight;
     };
 </script>

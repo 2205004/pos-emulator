@@ -1,139 +1,179 @@
-const WebSocket = require("ws");
+// -----------------------------------------------------------------------------
+// POS TERMINAL EMULATOR — TCP version (Flutter Compatible)
+// Web UI + Logs + Auto IP detect + Correct multiline SSE log
+// -----------------------------------------------------------------------------
+
+const net = require("net");
 const express = require("express");
 const http = require("http");
+const os = require("os");
 const path = require("path");
 
-// -------------------------
-// HTTP сервер для UI
-// -------------------------
+const PORT = 2222;
+
+// -----------------------------------------------------------------------------
+// WEB UI HTTP SERVER
+// -----------------------------------------------------------------------------
 
 const app = express();
-const server = http.createServer(app);
+const httpServer = http.createServer(app);
 
 app.use(express.static(path.join(__dirname, "public")));
 
-server.listen(8080, () => {
-    console.log("Web UI running on http://localhost:8080");
+httpServer.listen(8080, () => {
+    console.log("🌐 Web UI running on http://localhost:8080");
 });
 
-// -------------------------
-// WebSocket сервер (емулятор POS)
-// -------------------------
+// -----------------------------------------------------------------------------
+// GET /ips — return available IPs for client connection
+// -----------------------------------------------------------------------------
 
-const wss = new WebSocket.Server({
-    host: "192.168.0.222",
-    port: 2000
+app.get("/ips", (req, res) => {
+    const interfaces = os.networkInterfaces();
+    const ips = [];
+
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            if (iface.family === "IPv4" && !iface.internal) {
+                ips.push(iface.address);
+            }
+        }
+    }
+
+    res.json({
+        port: PORT,
+        ips: ips
+    });
 });
 
-console.log("POS emulator running at ws://192.168.0.222:2000");
+// -----------------------------------------------------------------------------
+// SEND LOG TO UI (via SSE) — FIXED MULTILINE
+// -----------------------------------------------------------------------------
 
-// Передаємо лог у веб-інтерфейс
-let uiSockets = [];
+let uiClients = [];
 
-const uiServer = new WebSocket.Server({ server });
-uiServer.on("connection", (ws) => {
-    uiSockets.push(ws);
-    ws.on("close", () => uiSockets = uiSockets.filter(c => c !== ws));
+app.get("/log-stream", (req, res) => {
+    res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+    });
+
+    uiClients.push(res);
+
+    req.on("close", () => {
+        uiClients = uiClients.filter(c => c !== res);
+    });
 });
 
 function uiLog(msg) {
-    uiSockets.forEach(ws => ws.send(msg));
+    const safe = msg.replace(/\n/g, "<br>");
+    uiClients.forEach(c => c.write(`data: ${safe}\n\n`));
+    console.log(msg);
 }
 
-function sendJSON(ws, obj, extraNullFirst = false) {
-    let json = JSON.stringify(obj);
-    let buffer = Buffer.from(json + "\x00");
+// -----------------------------------------------------------------------------
+// TCP SERVER (REAL POS TERMINAL EMULATOR)
+// -----------------------------------------------------------------------------
 
-    if (extraNullFirst)
-        buffer = Buffer.concat([Buffer.from([0x00]), buffer]);
+const server = net.createServer((socket) => {
+    const clientIP = socket.remoteAddress;
+    uiLog(`=== CLIENT CONNECTED (${clientIP}) ===`);
 
-    ws.send(buffer);
+    let buffer = "";
 
-    uiLog("<<< RESPONSE:\n" + json);
-}
+    socket.on("data", (data) => {
+        const text = data.toString("utf8");
+        buffer += text;
 
-wss.on("connection", (ws) => {
-    uiLog("=== КЛІЄНТ ПІДКЛЮЧИВСЯ ===");
+        // END OF MESSAGE = \u0000
+        if (buffer.includes("\u0000")) {
+            const clean = buffer.replace(/\u0000/g, "");
+            buffer = "";
 
-    ws.on("message", (raw) => {
-        const msg = raw.toString().replace(/\0/g, "");
-        uiLog(">>> REQUEST:\n" + msg);
+            uiLog(">>> REQUEST:<br>" + clean);
 
-        let data;
-        try { data = JSON.parse(msg); }
-        catch (e) { return; }
+            let json;
+            try {
+                json = JSON.parse(clean);
+            } catch (e) {
+                uiLog("❌ JSON PARSE ERROR");
+                return;
+            }
 
-        switch (data.method) {
+            let reply;
 
-            // ---------------------------
-            // PING DEVICE
-            // ---------------------------
+            // -------------------------------------------------------------
+            // PROTOCOL IMPLEMENTATION
+            // -------------------------------------------------------------
+            switch (json.method) {
 
-            case "PingDevice":
-                sendJSON(ws, {
-                    method: "PingDevice",
-                    step: 0,
-                    params: { code: "00", responseCode: "0000" },
-                    error: false,
-                    errorDescription: ""
-                });
-                break;
+                case "PingDevice":
+                    reply = {
+                        method: "PingDevice",
+                        step: 0,
+                        params: { code: "00", responseCode: "0000" },
+                        error: false,
+                        errorDescription: ""
+                    };
+                    break;
 
-            // ---------------------------
-            // IDENTIFY
-            // ---------------------------
+                case "ServiceMessage":
+                    if (json.params?.msgType === "identify") {
+                        reply = {
+                            method: "ServiceMessage",
+                            step: 0,
+                            params: {
+                                msgType: "identify",
+                                result: "true",
+                                vendor: "PAX",
+                                model: "s800"
+                            },
+                            error: false,
+                            errorDescription: ""
+                        };
+                    }
+                    break;
 
-            case "ServiceMessage":
-                if (data.params?.msgType === "identify") {
-                    sendJSON(ws, {
-                        method: "ServiceMessage",
+                case "Purchase":
+                    reply = {
+                        method: "Purchase",
                         step: 0,
                         params: {
-                            msgType: "identify",
-                            result: "true",
-                            vendor: "PAX",
-                            model: "s800"
+                            amount: json.params.amount,
+                            approvalCode: "999999",
+                            responseCode: "0000",
+                            rrn: Date.now().toString(),
+                            receipt: "TEST RECEIPT\nSUCCESS"
                         },
                         error: false,
                         errorDescription: ""
-                    });
-                }
-                break;
+                    };
+                    break;
 
-            // ---------------------------
-            // PURCHASE
-            // ---------------------------
+                default:
+                    reply = {
+                        method: "ServiceMessage",
+                        step: 0,
+                        params: { msgType: "methodNotImplemented" },
+                        error: false,
+                        errorDescription: "Method not implemented"
+                    };
+            }
 
-            case "Purchase":
-                sendJSON(ws, {
-                    method: "Purchase",
-                    step: 0,
-                    params: {
-                        amount: data.params.amount,
-                        approvalCode: "999999",
-                        responseCode: "0000",
-                        rrn: Date.now().toString(),
-                        receipt: "TEST RECEIPT\nSUCCESS"
-                    },
-                    error: false,
-                    errorDescription: ""
-                });
-                break;
+            // Send reply
+            const replyStr = JSON.stringify(reply) + "\u0000";
+            socket.write(replyStr);
 
-            // ---------------------------
-            // UNKNOWN METHOD
-            // ---------------------------
-
-            default:
-                sendJSON(ws, {
-                    method: "ServiceMessage",
-                    step: 0,
-                    params: { msgType: "methodNotImplemented" },
-                    error: false,
-                    errorDescription: ""
-                });
+            uiLog("<<< RESPONSE:<br>" + JSON.stringify(reply, null, 2).replace(/\n/g, "<br>"));
         }
     });
 
-    ws.on("close", () => uiLog("=== КЛІЄНТ ВІДКЛЮЧИВСЯ ==="));
+    socket.on("close", () => {
+        uiLog(`=== CLIENT DISCONNECTED (${clientIP}) ===`);
+    });
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+    console.log(`🟢 POS TCP emulator running on port ${PORT}`);
 });
