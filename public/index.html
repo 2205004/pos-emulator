@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>POS Emulator Monitor</title>
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        #log { border: 1px solid #ccc; padding: 10px; height: 500px; overflow-y: auto; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+
+<h2>POS Emulator WebSocket Log</h2>
+
+<div id="log">Очікування подій...</div>
+
+<script>
+    const ws = new WebSocket("ws://" + location.host);
+    const logDiv = document.getElementById("log");
+
+    ws.onmessage = (ev) => {
+        logDiv.textContent += "\n" + ev.data;
+        logDiv.scrollTop = logDiv.scrollHeight;
+    };
+</script>
+
+</body>
+</html>
